@@ -245,10 +245,9 @@ def download_history():
                                                 headers={'Authorization': 'Bearer ' + token})
                         if required_headers.issubset(response.headers):
                             break
-                        else:
-                            print("(invalid response, waiting 60 s) ")
-                            sys.stdout.flush()
-                            time.sleep(60)
+                        print("(invalid response, waiting 60 s) ")
+                        sys.stdout.flush()
+                        time.sleep(60)
 
                     if response.headers['x-ratelimit-remaining'] == '0':
                         sleep_time = int(response.headers['x-ratelimit-reset']) + 1
