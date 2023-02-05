@@ -41,6 +41,8 @@ instrument_types = {
 }
 
 
+#region Database schema
+
 # Generate IDENTITY columns instead of SERIAL
 # https://docs.sqlalchemy.org/en/13/dialects/postgresql.html#postgresql-10-identity-columns
 @compiles(CreateColumn, 'postgresql')
@@ -104,6 +106,10 @@ class Candle(Base):
     def __repr__(self) -> str:
         return f'{self.instrument_id:05} {self.timestamp:%Y-%m-%d %H:%M} ({self.low}-{self.open}-{self.close}-{self.high})'
 
+#endregion Database schema
+
+
+#region Database maintenance
 
 def deploy():
     """
@@ -189,24 +195,21 @@ def download_history():
         Candle.volume,
     ]
     csv_columns = [column.name for column in csv_columns]
+    TimeSpan = collections.namedtuple('TimeSpan', 'earliest, latest')
 
     with Session(db_engine) as db:
-        dbapi = db.connection().connection.cursor()
+        dbapi = db.connection().connection.cursor()  # a low-level DB API for importing CSV
         instruments = db.query(Instrument).order_by(Instrument.type_id, Instrument.name).all()
-        TimeSpan = collections.namedtuple('TimeSpan', 'earliest, latest')
         candle_spans = db.query(Candle.instrument_id, func.min(Candle.timestamp), func.max(Candle.timestamp))\
-                           .group_by(Candle.instrument_id)\
-                           .all()
+                         .group_by(Candle.instrument_id)\
+                         .all()
         candle_spans = {instrument_id: TimeSpan(earliest.year, latest.year) for (instrument_id, earliest, latest) in candle_spans}
-        sleep_time = 0  # request frequency limit
-        instruments_updated = 0
+        updated_instruments = set()
+        sleep_time = 0  # HTTP API request frequency limit
 
         try:
             for instrument in instruments:
                 print(f"{str(instrument.type).title()} {instrument}: ", end="")
-
-                if instrument.figi == 'BBG00G9DSXZ5':
-                    pass
 
                 # Determining potentially missing date ranges
                 candle_span = candle_spans.get(instrument.id, None)
@@ -237,17 +240,19 @@ def download_history():
                     if response.headers['x-ratelimit-remaining'] == '0':
                         sleep_time = int(response.headers['x-ratelimit-reset']) + 1
 
-                    if response.status_code == http.HTTPStatus.NOT_FOUND and year == datetime.now().year:
-                        if instrument.has_earliest_candles and candle_span.latest == datetime.now().year - 1:
-                            print("(up to date)", end="")
+                    if response.status_code == http.HTTPStatus.NOT_FOUND:
+                        if year == datetime.now().year:
+                            # Some instruments may not have recorded this year.
+                            if instrument.has_earliest_candles and candle_span.latest == datetime.now().year - 1:
+                                print("(up to date)", end="")
+                                break
+                            print(f"(no {datetime.now().year}) ", end="")
+                            continue
+                        else:
+                            instrument.has_earliest_candles = True
+                            db.commit()
+                            print("(earliest date)", end="")
                             break
-                        print("(not this year) ", end="")
-                        continue  # some instruments may not have recorded yet to history
-                    if response.status_code == http.HTTPStatus.NOT_FOUND and year < datetime.now().year:
-                        instrument.has_earliest_candles = True
-                        db.commit()
-                        print("(earliest date)", end="")
-                        break
                     elif response.status_code != http.HTTPStatus.OK:
                         print(response.headers.get('message', f"{http.HTTPStatus(response.status_code).name}, no message"), end="")
                         break
@@ -260,9 +265,7 @@ def download_history():
                         csv = csv.replace(uid_binary, id_binary).replace(b';\n', b'\n')
                         dbapi.copy_from(io.BytesIO(csv), Candle.__tablename__, sep=';', columns=csv_columns)
                         db.commit()
-                        if not loaded_any:
-                            loaded_any = True
-                            instruments_updated += 1
+                        updated_instruments.add(instrument.id)
                 print()
 
         except KeyboardInterrupt:
@@ -271,4 +274,6 @@ def download_history():
             print()
             raise
         finally:
-            print(f"{instruments_updated} instruments updated.\n")
+            print(f"{len(updated_instruments)} instruments updated.\n")
+
+#endregion Database maintenance
