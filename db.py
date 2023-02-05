@@ -4,6 +4,7 @@ import http
 import io
 import itertools
 import os
+import sys
 import time
 import zipfile
 from datetime import datetime
@@ -161,6 +162,7 @@ def download_instrument_info():
         try:
             for instrument_type in instrument_types:
                 print(instrument_types[instrument_type].title() + ": ", end="")
+                sys.stdout.flush()
                 # instrument_types.values() is a list of getter functions in Client
                 instruments = getattr(client.instruments, instrument_types[instrument_type])().instruments
                 loaded_count += 1
@@ -197,6 +199,7 @@ def download_history():
     ]
     csv_columns = [column.name for column in csv_columns]
     TimeSpan = collections.namedtuple('TimeSpan', 'earliest, latest')
+    required_headers = {'x-ratelimit-remaining', 'x-ratelimit-reset'}
 
     with Session(db_engine) as db:
         dbapi = db.connection().connection.cursor()  # a low-level DB API for importing CSV
@@ -211,6 +214,7 @@ def download_history():
         try:
             for instrument in instruments:
                 print(f"{str(instrument.type).title()} {instrument}: ", end="")
+                sys.stdout.flush()
 
                 # Determining potentially missing date ranges
                 candle_span = candle_spans.get(instrument.id, None)
@@ -232,11 +236,19 @@ def download_history():
                 for year in years:
                     if sleep_time > 0:
                         print(f"(waiting {sleep_time} s) ", end="")
+                        sys.stdout.flush()
                         time.sleep(sleep_time)
                         sleep_time = 0
 
-                    response = requests.get(f'https://invest-public-api.tinkoff.ru/history-data?figi={instrument.figi}&year={year}',
-                                            headers={'Authorization': 'Bearer ' + token})
+                    while True:
+                        response = requests.get(f'https://invest-public-api.tinkoff.ru/history-data?figi={instrument.figi}&year={year}',
+                                                headers={'Authorization': 'Bearer ' + token})
+                        if required_headers.issubset(response.headers):
+                            break
+                        else:
+                            print("(invalid response, waiting 60 s) ")
+                            sys.stdout.flush()
+                            time.sleep(60)
 
                     if response.headers['x-ratelimit-remaining'] == '0':
                         sleep_time = int(response.headers['x-ratelimit-reset']) + 1
@@ -245,9 +257,10 @@ def download_history():
                         if year == datetime.now().year:
                             # Some instruments may not have recorded this year.
                             if instrument.has_earliest_candles and candle_span.latest == datetime.now().year - 1:
-                                print("(up to date)", end="")
+                                print("up to date", end="")
                                 break
                             print(f"(no {datetime.now().year}) ", end="")
+                            sys.stdout.flush()
                             continue
                         else:
                             instrument.has_earliest_candles = True
@@ -258,6 +271,7 @@ def download_history():
                         print(response.headers.get('message', f"{http.HTTPStatus(response.status_code).name}, no message"), end="")
                         break
                     print(f"{year} ", end="")
+                    sys.stdout.flush()
 
                     zip_file = zipfile.ZipFile(io.BytesIO(response.content))
                     for csv_name in zip_file.namelist():
@@ -276,5 +290,15 @@ def download_history():
             raise
         finally:
             print(f"{len(updated_instruments)} instruments updated.\n")
+
+
+def backup(path: str):
+    # TODO
+    pass
+
+
+def restore(path: str):
+    # TODO
+    pass
 
 #endregion Database maintenance
