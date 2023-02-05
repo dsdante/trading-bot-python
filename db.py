@@ -186,6 +186,9 @@ def download_instrument_info():
 
 def download_history():
     """ Download the candle history """
+    # todo: data update after the end of a year
+    # todo: get the latest data from GetCandles()
+    # todo: stream the data to the neural network host
 
     print("Downloading candle history...")
     csv_columns = [
