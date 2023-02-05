@@ -115,7 +115,7 @@ def deploy():
     """
     Create a database and fill it with static data
 
-    If the database doesn't exist, the user must have the CREATEDB role.
+    If the database doesn't exist, the user must have the CREATEDB privilige.
     """
 
     print(f"Deploying database {db_engine.url.database}...", end="")
@@ -123,7 +123,7 @@ def deploy():
     # noinspection PyUnresolvedReferences
     try:
         # Try creating the database if it doesn't exist.
-        # Avoid startin a transaction. https://stackoverflow.com/a/68112827/934618
+        # Avoid starting a transaction. https://stackoverflow.com/a/68112827/934618
         connection = psycopg2.connect('dbname=postgres')
         connection.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
         with connection.cursor() as cursor:
@@ -147,15 +147,16 @@ def deploy():
 
 
 def download_instrument_info():
-    """ Download the instrument data """
+    """ Download the list of instruments and their properties """
 
     print("Downloading the instruments...")
     loaded_count = 0
     updated_count = 0
     with Session(db_engine) as db, tin.Client(token) as client:
+        select_query = sa.select(InstrumentType.name, InstrumentType.id)
         # noinspection PyTypeChecker
         # { instrument.name: instrument.id }
-        instrument_ids = dict(db.execute(sa.select(InstrumentType.name, InstrumentType.id)).all())
+        instrument_ids = dict(db.execute(select_query).all())
 
         try:
             for instrument_type in instrument_types:
