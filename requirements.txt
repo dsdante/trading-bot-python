@@ -1,5 +1,7 @@
-psycopg2-binary
 SQLAlchemy
-requests
 tinkoff
 tinkoff-investments
+aiohttp
+codetiming
+psycopg
+pytz

@@ -30,6 +30,5 @@ When running the bot from an IDE, you can set the environment variable in its pr
 ### 2.2 Running the bot
 
 Add or remove function calls in `trading_bot.py` as you see fit and run it.
-* `db.deploy()` — Create a database and fill it with the static data.
-* `download_instrument_info()` — Download a list of the instruments and their properties to the database.
-* `download_history()` — Download the candle history to the database. This function correctly resumes after an interruption (Ctrl+C). The instruments that have not yet been recorded this year are processed correctly. The current year is only downloaded at the first run; after that, it should be updated with `GetCandles()` (not yet implemented).
+* `host.deploy()` — Deploy the trading bot on this machine.
+* `update_instruments()` — Download and save the information about available instruments and their properties.
