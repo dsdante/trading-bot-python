@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import logging
 import os
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterable
 
 import aiohttp
+import codetiming
 import tinkoff.invest as ti
+
+import logger
 
 
 asset_types: list[str] = [
@@ -43,13 +45,14 @@ async def get_instruments() -> AsyncIterable[tuple[str, Any]]:
 
     :return: Pairs of instrument info and API response
     """
-    logging.info(f"Downloading instrument info.")
-
     async def instrument_get_task(asset_type: str, getter_name: str) -> tuple[str, Any]:
-        logging.info(f"Requesting {getter_name}.")
+        count = 0
         getter = getattr(client.instruments, getter_name)
-        response = await getter()
-        logging.info(f"Received {len(response.instruments)} {getter_name}")
+        with (codetiming.Timer(initial_text=f"Requesting {getter_name}.",
+                               text=lambda elapsed: f"Received {count} {getter_name} in {elapsed:.2f}s.",
+                               logger=logger.info)):
+            response = await getter()
+            count = len(response.instruments)
         return asset_type, response
 
     # Task launcher
@@ -57,7 +60,6 @@ async def get_instruments() -> AsyncIterable[tuple[str, Any]]:
         tasks = [asyncio.create_task(instrument_get_task(asset_type, getter_name)) for asset_type, getter_name in _instrument_getters.items()]
         for task in asyncio.as_completed(tasks):
             yield await task
-    logging.info(f"Instrument info downloaded.")
 
 
 def _close():
