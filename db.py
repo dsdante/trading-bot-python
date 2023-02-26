@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 import getpass
 import uuid
@@ -21,9 +22,9 @@ import logger
 _engine = create_async_engine(sa.URL.create(
     drivername='postgresql+psycopg',
     username=getpass.getuser(),
-    database='trading_bot'))
+    database='trading_bot'),
+    echo=False)
 
-_dsn = f'postgresql://@/{_engine.url.database}'
 _start_session: async_sessionmaker[AsyncSession] = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
 _asset_types_lock = asyncio.Lock()
 _asset_types: Optional[dict[str, AssetType]] = None
@@ -97,7 +98,7 @@ async def create(asset_types: Iterable[str]) -> None:
 
     :param asset_types: Names of asset types
     """
-    with (codetiming.Timer(text=f"Database {_engine.url.database} deployed in {{:.2f}}s.", logger=logger.info)):
+    with codetiming.Timer(text=f"Database {_engine.url.database} deployed in {{:.2f}}s.", logger=logger.debug):
         # Creating the schema
         try:
             async with _engine.begin() as connection:
@@ -128,7 +129,7 @@ async def _get_asset_types() -> dict[str, AssetType]:
         global _asset_types
         if _asset_types is not None:
             return _asset_types
-        with (codetiming.Timer(text=lambda elapsed: f"Read {len(_asset_types)} asset types in {elapsed:.2f}s.", logger=logger.info)):
+        with codetiming.Timer(text=lambda elapsed: f"Read {len(_asset_types)} asset types in {elapsed:.2f}s.", logger=logger.debug):
             async with _start_session() as session:
                 response = await session.execute(sa.select(AssetType))
             _asset_types = {asset_type.name: asset_type.id for asset_type, in response.all()}
@@ -147,7 +148,7 @@ async def add_instruments(asset_type: str, instruments: Sequence[Instrument]) ->
     stmt = pg.insert(Instrument)
     updated_data = {column.name: column for column in stmt.excluded if not column.primary_key}
     stmt = stmt.on_conflict_do_update(index_elements=[Instrument.uid], set_=updated_data)
-    with (codetiming.Timer(text=lambda elapsed: f"Saved {len(instrument_data)} {asset_type} in {elapsed:.2f}s.", logger=logger.info)):
+    with codetiming.Timer(text=lambda elapsed: f"Saved {len(instrument_data)} {asset_type} in {elapsed:.2f}s.", logger=logger.debug):
         async with _start_session() as session:
             await session.execute(stmt, instrument_data)
             await session.commit()
