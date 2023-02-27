@@ -46,10 +46,11 @@ async def get_instruments() -> AsyncIterable[tuple[str, Any]]:
     """
     async def instrument_get_task(asset_type: str, getter_name: str) -> tuple[str, Any]:
         getter = getattr(client.instruments, getter_name)
+        count = 0
         with codetiming.Timer(initial_text=f"Requesting {getter_name}...",
                               text=lambda elapsed: f"Received {count} {getter_name} in {elapsed:.2f}s.",
                               logger=logger.debug):
-            response = await getter()
+            response = await getter(instrument_status=ti.schemas.InstrumentStatus.INSTRUMENT_STATUS_ALL)
             count = len(response.instruments)
         return asset_type, response
 

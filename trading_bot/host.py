@@ -1,4 +1,6 @@
 import asyncio
+from datetime import datetime
+from typing import Optional
 
 import codetiming
 import tinkoff.invest as ti
@@ -20,11 +22,15 @@ def deploy() -> None:
 
 
 def _api_to_db_instrument(api_instrument: ti.schemas.Instrument) -> db.Instrument:
+    # Clear timezone info, return None instead of 1970.01.01
+    def api_to_db_datetime(dt: datetime) -> Optional[datetime]:
+        return dt.replace(tzinfo=None) if dt.timestamp() else None
+
     # Convert a Tinkoff API instrument to an SQLAlchemy instrument.
     db_instrument = db.Instrument()
     vars(db_instrument).update(vars(api_instrument))
-    db_instrument.first_1min_candle_date = db_instrument.first_1min_candle_date.replace(tzinfo=None)
-    db_instrument.first_1day_candle_date = db_instrument.first_1day_candle_date.replace(tzinfo=None)
+    db_instrument.first_1min_candle_date = api_to_db_datetime(db_instrument.first_1min_candle_date)
+    db_instrument.first_1day_candle_date = api_to_db_datetime(db_instrument.first_1day_candle_date)
     return db_instrument
 
 

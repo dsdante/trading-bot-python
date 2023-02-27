@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import datetime
 import getpass
 import uuid
@@ -54,16 +53,17 @@ class Instrument(Base):
     """ A single currency, share, bond, etc """
     __tablename__ = 'instrument'
 
+    # Compatible with the API instrument response
     id: Mapped[int] = mapped_column(sa.Identity(), primary_key=True)
     uid: Mapped[uuid.UUID] = mapped_column(unique=True)
     figi: Mapped[Optional[str]] = mapped_column(type_=Text)
     name: Mapped[str] = mapped_column(type_=Text)
     asset_type_id: Mapped[int] = mapped_column('asset_type', ForeignKey('asset_type.id'))
-    lot: Mapped[int] = mapped_column()
-    first_1min_candle_date: Mapped[datetime] = mapped_column()
-    first_1day_candle_date: Mapped[datetime] = mapped_column()
-    for_qual_investor_flag: Mapped[bool] = mapped_column()
-    has_earliest_candles: Mapped[bool] = mapped_column(default=False)
+    lot: Mapped[int] = mapped_column()  # minimum size of a deal
+    otc_flag: Mapped[bool] = mapped_column()  # traded over the counter
+    for_qual_investor_flag: Mapped[bool] = mapped_column()  # only available for qualified investors
+    first_1min_candle_date: Mapped[Optional[datetime]] = mapped_column()
+    first_1day_candle_date: Mapped[Optional[datetime]] = mapped_column()
 
     asset_type_ref: Mapped[AssetType] = relationship(back_populates='instruments_ref')
     candles_ref: Mapped[list[Candle]] = relationship(back_populates='instrument_ref')
@@ -76,7 +76,7 @@ class Candle(Base):
     """ Historical pricing datum for an instrument """
     __tablename__ = 'candle'
 
-    # Must be compatible with the history CSV files
+    # Compatible with the history CSV files
     instrument_id: Mapped[int] = mapped_column('instrument', ForeignKey('instrument.id'), primary_key=True)
     timestamp: Mapped[datetime] = mapped_column(primary_key=True)
     open: Mapped[float] = mapped_column()
