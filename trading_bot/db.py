@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 from datetime import datetime
 import getpass
 import uuid
-from typing import Optional, Iterable, Sequence
+from typing import Optional, Iterable, Sequence, AsyncGenerator
 
 import codetiming
 import psycopg
@@ -43,7 +44,7 @@ class AssetType(Base):
     id: Mapped[int] = mapped_column(sa.Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(type_=Text, unique=True)
 
-    instruments_ref: Mapped[list[Instrument]] = relationship(back_populates='asset_type_ref')
+    instruments_ref: Mapped[list[Instrument]] = relationship(back_populates='asset_type_ref', lazy='raise')
 
     def __repr__(self) -> str:
         return self.name
@@ -62,11 +63,12 @@ class Instrument(Base):
     lot: Mapped[int] = mapped_column()  # minimum size of a deal
     otc_flag: Mapped[bool] = mapped_column()  # traded over the counter
     for_qual_investor_flag: Mapped[bool] = mapped_column()  # only available for qualified investors
+    api_trade_available_flag: Mapped[bool] = mapped_column()
     first_1min_candle_date: Mapped[Optional[datetime]] = mapped_column()
     first_1day_candle_date: Mapped[Optional[datetime]] = mapped_column()
 
-    asset_type_ref: Mapped[AssetType] = relationship(back_populates='instruments_ref')
-    candles_ref: Mapped[list[Candle]] = relationship(back_populates='instrument_ref')
+    asset_type_ref: Mapped[AssetType] = relationship(back_populates='instruments_ref', lazy='raise')
+    candles_ref: Mapped[list[Candle]] = relationship(back_populates='instrument_ref', lazy='raise')
 
     def __repr__(self) -> str:
         return f'{self.name} ({self.figi})'
@@ -85,7 +87,7 @@ class Candle(Base):
     low: Mapped[float] = mapped_column()
     volume: Mapped[int] = mapped_column()
 
-    instrument_ref: Mapped[Instrument] = relationship(back_populates='candles_ref')
+    instrument_ref: Mapped[Instrument] = relationship(back_populates='candles_ref', lazy='raise')
 
     def __repr__(self) -> str:
         return f'{self.instrument_id:05} {self.timestamp:%Y-%m-%d %H:%M} ({self.low}-{self.open}-{self.close}-{self.high})'
@@ -152,3 +154,37 @@ async def add_instruments(asset_type: str, instruments: Sequence[Instrument]) ->
         async with _start_session() as session:
             await session.execute(stmt, instrument_data)
             await session.commit()
+
+
+async def get_history_endings(figis: Optional[Iterable[str]] = None) -> AsyncGenerator[tuple[Instrument, datetime]]:
+    """ Get the last candle timestamp for each instrument.
+
+    :param figis: List of instrument FIGIs to request. None means all known instruments with a FIGI.
+    """
+    subquery = sa.select(Candle.instrument_id,
+                         sa.func.max(Candle.timestamp).label('latest'))\
+        .group_by(Candle.instrument_id)\
+        .subquery()
+    query = sa.select(Instrument,
+                      sa.func.coalesce(subquery.c.latest, Instrument.first_1min_candle_date).label('history_end'))\
+        .join(subquery, Instrument.id == subquery.c.instrument_id, isouter=True)\
+        .where((Instrument.figi != None) & (Instrument.first_1min_candle_date != None))\
+        .order_by('history_end')
+
+    with codetiming.Timer(initial_text="Requesting history endings...",
+                          text="Received history endings in {:.2f}s.",
+                          logger=logger.debug):
+        async with _start_session() as session:
+            response = await session.execute(query)
+
+    for instrument, history_end in response:
+        if figis is None or instrument.figi in figis:
+            yield instrument, history_end
+
+
+def _close():
+    # Clean-up at exit.
+    asyncio.run(_engine.dispose())
+    logger.debug("Psycopg engine disposed.")
+
+atexit.register(_close)

@@ -4,7 +4,7 @@ import asyncio
 import atexit
 import os
 from datetime import datetime, timedelta
-from typing import Any, AsyncIterable, Optional
+from typing import Any, Optional, Iterable, AsyncGenerator
 
 import aiohttp
 import codetiming
@@ -33,13 +33,14 @@ _instrument_getters = {
 
 _token = os.environ['INVEST_TOKEN']
 _history_headers = {'Authorization': 'Bearer ' + _token}
+# TODO initialize
 _session: Optional[aiohttp.ClientSession] = None
 _history_limit = 1
 _history_limit_reset = datetime.now() + timedelta(minutes=1)
 _history_request_queue = asyncio.Queue()
 
 
-async def get_instruments() -> AsyncIterable[tuple[str, Any]]:
+async def get_instruments(_asset_types: Optional[Iterable[str]] = None) -> AsyncGenerator[tuple[str, Any]]:
     """ Download instrument info.
 
     :return: Pairs of instrument info and API response
@@ -55,8 +56,9 @@ async def get_instruments() -> AsyncIterable[tuple[str, Any]]:
         return asset_type, response
 
     # Task launcher
+    getters = (getter for getter in _instrument_getters.items() if not _asset_types or getter[0] in _asset_types)
     async with ti.AsyncClient(_token) as client:
-        tasks = [asyncio.create_task(instrument_get_task(asset_type, getter_name)) for asset_type, getter_name in _instrument_getters.items()]
+        tasks = [asyncio.create_task(instrument_get_task(asset_type, getter_name)) for asset_type, getter_name in getters]
         for task in asyncio.as_completed(tasks):
             yield await task
 
