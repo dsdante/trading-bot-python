@@ -32,3 +32,4 @@ When running the bot from an IDE, you can set the environment variable in its pr
 Add or remove function calls in `trading_bot.py` as you see fit and run it.
 * `host.deploy()` — Deploy the trading bot on this machine.
 * `host.update_instruments()` — Download and save the information about available instruments and their properties.
+* `host.download_history()` — Download the candle history to the database.

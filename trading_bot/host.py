@@ -56,7 +56,11 @@ async def download_history_async(figis: Optional[Iterable[str]] = None) -> None:
     :param figis: The list of instruments to download; None to download all known.
     """
     async for instrument, history_end in db.get_history_endings(figis):
-        print(f"{instrument.figi} {history_end}")
+        with open(f'{instrument.figi}.csv', mode='wb') as file:
+            async for csv in tapi.get_history_csvs(instrument.figi, history_end.year):
+                csv = csv.replace(str(instrument.uid).encode(), str(instrument.id).encode())  # replace UID with ID
+                csv = csv.replace(b';\n', b'\n')  # remove the trailing semicolon
+                file.write(csv)
 
 
 def download_history(figis: Optional[Iterable[str]] = None) -> None:
