@@ -54,7 +54,7 @@ _history_limit = 1
 _history_limit_timeout: datetime = datetime.now()
 _history_limit_updated = asyncio.Event()
 _history_request_queue: asyncio.PriorityQueue[tuple[int, asyncio.Event]] = asyncio.PriorityQueue()
-_history_request_priority = 0  # earlier calls have highter priority
+_history_next_request_priority = 0  # earlier calls have highter priority
 _history_running_requests = 0
 
 
@@ -97,7 +97,7 @@ async def get_history_csvs(figi: str, first_year: int) -> AsyncGenerator[bytearr
     # A 404 Not Found response means end of history. Any other error gives a second chance.
     # A failed second chance is logged as a warning and considered end of history.
 
-    global _history_request_priority
+    global _history_next_request_priority
     global _history_limit
     global _history_limit_max
     global _history_limit_period
@@ -108,22 +108,23 @@ async def get_history_csvs(figi: str, first_year: int) -> AsyncGenerator[bytearr
     global _process_executor
     global _session
 
-    year = first_year
-    downloaded_count = 0
-    can_proceed = asyncio.Event()
-    priority = _history_request_priority
-    _history_request_priority += 1  # continuous numeration of all requests for the current program run
-    first_chance_failed = False
-    loop = asyncio.get_event_loop()
     try:
-        _history_running_requests += 1
         async with _history_api_lock:
+            _history_running_requests += 1
             if not _history_limit_watcher_task:
                 _history_limit_watcher_task = asyncio.create_task(_history_limit_watcher())
             if not _session:
                 _session =  aiohttp.ClientSession(headers={'Authorization': 'Bearer ' + _token})
             if not _process_executor:
                 _process_executor = concurrent.futures.ProcessPoolExecutor()
+
+        year = first_year
+        downloaded_count = 0
+        can_proceed = asyncio.Event()
+        priority = _history_next_request_priority
+        _history_next_request_priority += 1  # continuous numeration of all requests for the current program run
+        first_chance_failed = False
+        loop = asyncio.get_event_loop()
 
         with codetiming.Timer(initial_text=f"Downloading history of {figi}, starting with {first_year}...",
                               text=lambda elapsed: f"Downloaded {downloaded_count} years of {figi} in {elapsed:.2f}s.",
@@ -189,9 +190,9 @@ async def get_history_csvs(figi: str, first_year: int) -> AsyncGenerator[bytearr
                     priority += _SECOND_CHANCE_PRIORITY  # retry at the end
     finally:
         # The last one to leave, turn off the lights.
-        _history_running_requests -= 1
-        if _history_running_requests == 0:
-            async with _history_api_lock:
+        async with _history_api_lock:
+            _history_running_requests -= 1
+            if _history_running_requests == 0:
                 if _session:
                     await _session.close()
                     _session = None
@@ -230,7 +231,10 @@ async def _history_limit_watcher() -> None:
         wait_period = _history_limit_timeout - datetime.now()
         if wait_period > timedelta(0):
             with contextlib.suppress(asyncio.TimeoutError):
+                logger.debug(f"{_history_limit_watcher.__name__}(): Waiting for {wait_period.total_seconds():.2f}s.")
                 await asyncio.wait_for(_history_limit_updated.wait(), wait_period.total_seconds())
+                if _history_limit_updated.is_set():
+                    logger.debug(f"{_history_limit_watcher.__name__}(): Woke up to update the timeout.")
         _history_limit_updated.clear()
         while _history_limit_timeout <= datetime.now():
             _history_limit = _history_limit_max
