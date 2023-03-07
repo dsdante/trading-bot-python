@@ -1,7 +1,5 @@
 import asyncio
-import os.path
 from datetime import datetime
-import pathlib
 from typing import Optional, Iterable
 
 import codetiming
@@ -57,14 +55,16 @@ async def download_history_async(figis: Optional[Iterable[str]] = None) -> None:
 
     :param figis: The list of instruments to download; None to download all known.
     """
-    # TODO as_completed
 
     async def get_history_task(instrument, first_year):
-        with open(os.path.join(pathlib.Path.home(), instrument.figi + '.csv'), mode='wb') as file:
-            async for csv in tapi.get_history_csvs(instrument.figi, first_year):
-                csv = csv.replace(str(instrument.uid).encode(), str(instrument.id).encode())  # replace UID with ID
-                csv = csv.replace(b';\n', b'\n')  # remove the trailing semicolon
-                file.write(csv)
+        uid_binary = str(instrument.uid).encode()
+        id_binary = str(instrument.id).encode()
+        db_tasks = []
+        async for csv in tapi.get_history_csvs(instrument.figi, first_year):
+            csv = csv.replace(uid_binary, id_binary)
+            csv = csv.replace(b';\n', b'\n')  # remove the trailing semicolon
+            tasks.append(asyncio.create_task(db.save_candle_history(csv)))
+        await asyncio.gather(*db_tasks)
 
     tasks = []
     async for instr, history_end in db.get_history_endings(figis):

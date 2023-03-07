@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-from datetime import datetime
 import getpass
 import uuid
+from datetime import datetime
 from typing import Optional, Iterable, Sequence, AsyncGenerator
 
 import codetiming
 import psycopg
+import psycopg_pool
 import sqlalchemy as sa
 import sqlalchemy.dialects.postgresql as pg
 import sqlalchemy.exc
@@ -27,7 +28,9 @@ _engine = create_async_engine(sa.URL.create(
 
 _start_session: async_sessionmaker[AsyncSession] = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
 _asset_types_lock = asyncio.Lock()
+_candle_lock = asyncio.Lock()
 _asset_types: Optional[dict[str, AssetType]] = None
+_pg_pool: Optional[psycopg_pool.AsyncConnectionPool] = None
 
 
 #region Database schema
@@ -155,7 +158,6 @@ async def add_instruments(asset_type: str, instruments: Sequence[Instrument]) ->
             await session.execute(stmt, instrument_data)
             await session.commit()
 
-
 async def get_history_endings(figis: Optional[Iterable[str]] = None) -> AsyncGenerator[tuple[Instrument, datetime]]:
     """ Get the last candle timestamp for each instrument.
 
@@ -180,6 +182,25 @@ async def get_history_endings(figis: Optional[Iterable[str]] = None) -> AsyncGen
     for instrument, history_end in response:
         if figis is None or instrument.figi in figis:
             yield instrument, history_end
+
+
+async def save_candle_history(csv: bytearray) -> None:
+    temp_table = "candle_" + str(uuid.uuid4().hex)[:56]
+
+    async with _candle_lock:
+        global _pg_pool
+        if not _pg_pool:
+            _pg_pool = psycopg_pool.AsyncConnectionPool(f'dbname={_engine.url.database} user={_engine.url.username}')
+
+        async with _pg_pool.connection() as connection:
+            async with connection.cursor() as cursor:
+                await cursor.execute(f'CREATE TEMP TABLE {temp_table} (LIKE candle) ON COMMIT DROP')
+                async with cursor.copy(f"COPY {temp_table}(instrument, timestamp, open, close, high, low, volume) FROM STDIN CSV DELIMITER ';'") as copy:
+                    await copy.write(csv)
+                await cursor.execute(f'INSERT INTO candle SELECT * FROM {temp_table} ON CONFLICT DO NOTHING')
+            await connection.commit()
+
+    logger.debug(f"Saved {len(csv) / 1024 / 1024:.2f} MB of candles.")
 
 
 def _close():

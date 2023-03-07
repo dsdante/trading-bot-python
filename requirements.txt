@@ -4,4 +4,4 @@ tinkoff-investments
 aiohttp
 codetiming
 psycopg
-pytz
+psycopg[pool]
