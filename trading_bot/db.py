@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import atexit
 import getpass
 import uuid
 from datetime import datetime
-from typing import Optional, Iterable, Sequence, AsyncGenerator
+from types import TracebackType
+from typing import Optional, Iterable, Sequence, AsyncGenerator, Type
 
 import codetiming
 import psycopg
@@ -20,20 +20,8 @@ from sqlalchemy.types import Text
 
 import logger
 
-_engine = create_async_engine(sa.URL.create(
-    drivername='postgresql+psycopg',
-    username=getpass.getuser(),
-    database='trading_bot'),
-    echo=False)
 
-_start_session: async_sessionmaker[AsyncSession] = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
-_asset_types_lock = asyncio.Lock()
-_candle_lock = asyncio.Lock()
-_asset_types: Optional[dict[str, AssetType]] = None
-_pg_pool: Optional[psycopg_pool.AsyncConnectionPool] = None
-
-
-#region Database schema
+# region Database schema
 
 class Base(DeclarativeBase):
     """ An SQLAlchemy declarative base """
@@ -95,117 +83,141 @@ class Candle(Base):
     def __repr__(self) -> str:
         return f'{self.instrument_id:05} {self.timestamp:%Y-%m-%d %H:%M} ({self.low}-{self.open}-{self.close}-{self.high})'
 
-#endregion Database schema
+# endregion Database schema
 
 
-async def create(asset_types: Iterable[str]) -> None:
-    """ Create a database and fill it with static data.
+class DB:
+    _engine = create_async_engine(sa.URL.create(
+        drivername='postgresql+psycopg',
+        username=getpass.getuser(),
+        database='trading_bot'),
+        echo=False)
+    _start_session: async_sessionmaker[AsyncSession] = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+    _asset_types_lock = asyncio.Lock()
+    _candle_lock = asyncio.Lock()
+    _asset_types: Optional[dict[str, AssetType]] = None
+    _pg_pool: psycopg_pool.AsyncConnectionPool
 
-    :param asset_types: Names of asset types
-    """
-    with codetiming.Timer(text=f"Database {_engine.url.database} deployed in {{:.2f}}s.", logger=logger.debug):
-        # Creating the schema
-        try:
-            async with _engine.begin() as connection:
-                await connection.run_sync(Base.metadata.create_all)
 
-        except sa.exc.OperationalError:
-            # If the DB did not exist, create it first, then retry.
-            async with await psycopg.AsyncConnection.connect('dbname=postgres', autocommit=True) as connection:
+    async def __aenter__(self) -> DB:
+        await self.connect()
+        return self
+
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType]
+    ) -> None:
+        await self.disconnect()
+
+
+    async def connect(self) -> None:
+        self._pg_pool = psycopg_pool.AsyncConnectionPool(f'dbname={self._engine.url.database} user={self._engine.url.username}')
+
+
+    async def disconnect(self) -> None:
+        await self._pg_pool.close()
+        await self._engine.dispose()
+        logger.debug("Psycopg engine disposed.")
+
+
+    async def create(self, asset_types: Iterable[str]) -> None:
+        """ Create a database and fill it with static data.
+
+        :param asset_types: Names of asset types
+        """
+        with codetiming.Timer(text=f"Database {self._engine.url.database} deployed in {{:.2f}}s.", logger=logger.debug):
+            # Creating the schema
+            try:
+                async with self._engine.begin() as connection:
+                    await connection.run_sync(Base.metadata.create_all)
+
+            except sa.exc.OperationalError:
+                # If the DB did not exist, create it first, then retry.
+                async with await psycopg.AsyncConnection.connect('dbname=postgres', autocommit=True) as connection:
+                    async with connection.cursor() as cursor:
+                        await cursor.execute(f'CREATE DATABASE {self._engine.url.database};')
+                # Second attempt
+                async with self._engine.begin() as connection:
+                    await connection.run_sync(Base.metadata.create_all)
+
+            # Static data
+            values = [{'name': name} for name in asset_types]
+            async with self._start_session() as session:
+                await session.execute(pg.insert(AssetType).on_conflict_do_nothing(), values)
+                await session.commit()
+
+        self._asset_types = None
+
+
+    async def _get_asset_types(self) -> dict[str, AssetType]:
+        # Update and return asset types by their IDs.
+        async with self._asset_types_lock:
+            if self._asset_types is not None:
+                return self._asset_types
+            with codetiming.Timer(text=lambda elapsed: f"Read {len(self._asset_types)} asset types in {elapsed:.2f}s.", logger=logger.debug):
+                async with self._start_session() as session:
+                    response = await session.execute(sa.select(AssetType))
+                self._asset_types = {asset_type.name: asset_type.id for asset_type, in response.all()}
+            return self._asset_types
+
+
+    async def add_instruments(self, asset_type: str, instruments: Sequence[Instrument]) -> None:
+        """ Add new instruments (of the same type) to the database.
+
+        :param asset_type: The type of the instruments
+        :param instruments: DB instrument objects
+        """
+        asset_types = await self._get_asset_types()
+        asset_type_field = {Instrument.asset_type_id.key: asset_types[asset_type]}
+        instrument_data = [vars(instrument) | asset_type_field for instrument in instruments]
+        stmt = pg.insert(Instrument)
+        updated_data = {column.name: column for column in stmt.excluded if not column.primary_key}
+        stmt = stmt.on_conflict_do_update(index_elements=[Instrument.uid], set_=updated_data)
+        with codetiming.Timer(text=lambda elapsed: f"Saved {len(instrument_data)} {asset_type} in {elapsed:.2f}s.", logger=logger.debug):
+            async with self._start_session() as session:
+                await session.execute(stmt, instrument_data)
+                await session.commit()
+
+
+    async def get_history_endings(self, figis: Optional[Iterable[str]] = None) -> AsyncGenerator[tuple[Instrument, datetime]]:
+        """ Get the last candle timestamp for each instrument.
+
+        :param figis: List of instrument FIGIs to request. None means all known instruments with a FIGI.
+        """
+        subquery = sa.select(Candle.instrument_id,
+                             sa.func.max(Candle.timestamp).label('latest'))\
+            .group_by(Candle.instrument_id)\
+            .subquery()
+        query = sa.select(Instrument,
+                          sa.func.coalesce(subquery.c.latest, Instrument.first_1min_candle_date).label('history_end'))\
+            .join(subquery, Instrument.id == subquery.c.instrument_id, isouter=True)\
+            .where((Instrument.figi != None) & (Instrument.first_1min_candle_date != None))\
+            .order_by('history_end')
+
+        with codetiming.Timer(initial_text="Requesting history endings...",
+                              text="Received history endings in {:.2f}s.",
+                              logger=logger.debug):
+            async with self._start_session() as session:
+                response = await session.execute(query)
+
+        for instrument, history_end in response:
+            if figis is None or instrument.figi in figis:
+                yield instrument, history_end
+
+
+    async def save_candle_history(self, csv: bytearray) -> None:
+        temp_table = "candle_" + str(uuid.uuid4().hex)[:56]
+
+        async with self._candle_lock:
+            async with self._pg_pool.connection() as connection:
                 async with connection.cursor() as cursor:
-                    await cursor.execute(f'CREATE DATABASE {_engine.url.database};')
-            # Second attempt
-            async with _engine.begin() as connection:
-                await connection.run_sync(Base.metadata.create_all)
+                    await cursor.execute(f'CREATE TEMP TABLE {temp_table} (LIKE candle) ON COMMIT DROP')
+                    async with cursor.copy(f"COPY {temp_table}(instrument, timestamp, open, close, high, low, volume) FROM STDIN CSV DELIMITER ';'") as copy:
+                        await copy.write(csv)
+                    await cursor.execute(f'INSERT INTO candle SELECT * FROM {temp_table} ON CONFLICT DO NOTHING')
+                await connection.commit()
 
-        # Static data
-        values = [{'name': name} for name in asset_types]
-        async with _start_session() as session:
-            await session.execute(pg.insert(AssetType).on_conflict_do_nothing(), values)
-            await session.commit()
-
-    global _asset_types
-    _asset_types = None
-
-
-async def _get_asset_types() -> dict[str, AssetType]:
-    # Update and return asset types by their IDs.
-    async with _asset_types_lock:
-        global _asset_types
-        if _asset_types is not None:
-            return _asset_types
-        with codetiming.Timer(text=lambda elapsed: f"Read {len(_asset_types)} asset types in {elapsed:.2f}s.", logger=logger.debug):
-            async with _start_session() as session:
-                response = await session.execute(sa.select(AssetType))
-            _asset_types = {asset_type.name: asset_type.id for asset_type, in response.all()}
-        return _asset_types
-
-
-async def add_instruments(asset_type: str, instruments: Sequence[Instrument]) -> None:
-    """ Add new instruments (of the same type) to the database.
-
-    :param asset_type: The type of the instruments
-    :param instruments: DB instrument objects
-    """
-    asset_types = await _get_asset_types()
-    asset_type_field = {Instrument.asset_type_id.key: asset_types[asset_type]}
-    instrument_data = [vars(instrument) | asset_type_field for instrument in instruments]
-    stmt = pg.insert(Instrument)
-    updated_data = {column.name: column for column in stmt.excluded if not column.primary_key}
-    stmt = stmt.on_conflict_do_update(index_elements=[Instrument.uid], set_=updated_data)
-    with codetiming.Timer(text=lambda elapsed: f"Saved {len(instrument_data)} {asset_type} in {elapsed:.2f}s.", logger=logger.debug):
-        async with _start_session() as session:
-            await session.execute(stmt, instrument_data)
-            await session.commit()
-
-async def get_history_endings(figis: Optional[Iterable[str]] = None) -> AsyncGenerator[tuple[Instrument, datetime]]:
-    """ Get the last candle timestamp for each instrument.
-
-    :param figis: List of instrument FIGIs to request. None means all known instruments with a FIGI.
-    """
-    subquery = sa.select(Candle.instrument_id,
-                         sa.func.max(Candle.timestamp).label('latest'))\
-        .group_by(Candle.instrument_id)\
-        .subquery()
-    query = sa.select(Instrument,
-                      sa.func.coalesce(subquery.c.latest, Instrument.first_1min_candle_date).label('history_end'))\
-        .join(subquery, Instrument.id == subquery.c.instrument_id, isouter=True)\
-        .where((Instrument.figi != None) & (Instrument.first_1min_candle_date != None))\
-        .order_by('history_end')
-
-    with codetiming.Timer(initial_text="Requesting history endings...",
-                          text="Received history endings in {:.2f}s.",
-                          logger=logger.debug):
-        async with _start_session() as session:
-            response = await session.execute(query)
-
-    for instrument, history_end in response:
-        if figis is None or instrument.figi in figis:
-            yield instrument, history_end
-
-
-async def save_candle_history(csv: bytearray) -> None:
-    temp_table = "candle_" + str(uuid.uuid4().hex)[:56]
-
-    async with _candle_lock:
-        global _pg_pool
-        if not _pg_pool:
-            _pg_pool = psycopg_pool.AsyncConnectionPool(f'dbname={_engine.url.database} user={_engine.url.username}')
-
-        async with _pg_pool.connection() as connection:
-            async with connection.cursor() as cursor:
-                await cursor.execute(f'CREATE TEMP TABLE {temp_table} (LIKE candle) ON COMMIT DROP')
-                async with cursor.copy(f"COPY {temp_table}(instrument, timestamp, open, close, high, low, volume) FROM STDIN CSV DELIMITER ';'") as copy:
-                    await copy.write(csv)
-                await cursor.execute(f'INSERT INTO candle SELECT * FROM {temp_table} ON CONFLICT DO NOTHING')
-            await connection.commit()
-
-    logger.debug(f"Saved {len(csv) / 1024 / 1024:.2f} MB of candles.")
-
-
-def _close():
-    # Clean-up at exit.
-    asyncio.run(_engine.dispose())
-    logger.debug("Psycopg engine disposed.")
-
-atexit.register(_close)
+        logger.debug(f"Saved {len(csv) / 1024 / 1024:.2f} MB of candles.")
