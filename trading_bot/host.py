@@ -44,7 +44,7 @@ class Host:
         await self._db.create(tapi.asset_types)
 
 
-    async def update_instruments_async(self, asset_types: Optional[Iterable[str]] = None) -> None:
+    async def update_instruments(self, asset_types: Optional[Iterable[str]] = None) -> None:
         """ Update the instrument info asynchronously. """
 
         def api_to_db_instrument(api_instrument: ti.schemas.Instrument) -> db.Instrument:
@@ -66,11 +66,6 @@ class Host:
                 db_instruments = [api_to_db_instrument(api_instrument) for api_instrument in response.instruments]
                 count += len(db_instruments)
                 await self._db.add_instruments(asset_type, db_instruments)
-
-
-    def update_instruments(self, asset_types: Optional[Iterable[str]] = None) -> None:
-        """ Update the instrument info. """
-        asyncio.run(self.update_instruments_async(asset_types))
 
 
     async def download_history(self, figis: Optional[Iterable[str]] = None) -> None:
