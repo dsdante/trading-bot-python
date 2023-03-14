@@ -13,6 +13,7 @@ import psycopg_pool
 import sqlalchemy as sa
 import sqlalchemy.dialects.postgresql as pg
 import sqlalchemy.exc
+from psycopg.abc import Buffer
 from sqlalchemy import ForeignKey
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine, AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, relationship
@@ -94,7 +95,6 @@ class DB:
         echo=False)
     _start_session: async_sessionmaker[AsyncSession] = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
     _asset_types_lock = asyncio.Lock()
-    _candle_lock = asyncio.Lock()
     _asset_types: Optional[dict[str, AssetType]] = None
     _pg_pool: psycopg_pool.AsyncConnectionPool
 
@@ -118,6 +118,7 @@ class DB:
 
 
     async def disconnect(self) -> None:
+        # TODO: @contextlib.asynccontextmanager
         await self._pg_pool.close()
         await self._engine.dispose()
         logger.debug("Psycopg engine disposed.")
@@ -207,11 +208,9 @@ class DB:
             if figis is None or instrument.figi in figis:
                 yield instrument, history_end
 
-
-    async def save_candle_history(self, csv: bytearray) -> None:
+    async def save_candle_history(self, csv: Buffer) -> None:
         temp_table = "candle_" + str(uuid.uuid4().hex)[:56]
-
-        async with self._candle_lock:
+        with codetiming.Timer(text=f"Saved {len(csv) / 1024 / 1024:.2f} MB of candles in {{:.2f}} s"):
             async with self._pg_pool.connection() as connection:
                 async with connection.cursor() as cursor:
                     await cursor.execute(f'CREATE TEMP TABLE {temp_table} (LIKE candle) ON COMMIT DROP')
@@ -219,5 +218,3 @@ class DB:
                         await copy.write(csv)
                     await cursor.execute(f'INSERT INTO candle SELECT * FROM {temp_table} ON CONFLICT DO NOTHING')
                 await connection.commit()
-
-        logger.debug(f"Saved {len(csv) / 1024 / 1024:.2f} MB of candles.")

@@ -86,7 +86,7 @@ class Host:
             async for csv in tapi.get_history_csvs(instrument.figi, first_year):
                 csv = csv.replace(uid_binary, id_binary)
                 csv = csv.replace(b';\n', b'\n')  # remove the trailing semicolon
-                tasks.append(asyncio.create_task(self._db.save_candle_history(csv)))
+                db_tasks.append(asyncio.create_task(self._db.save_candle_history(csv)))
             await asyncio.gather(*db_tasks)
 
         tasks = []
