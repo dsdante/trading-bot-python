@@ -25,12 +25,12 @@ import logger
 # region Database schema
 
 class Base(DeclarativeBase):
-    """ An SQLAlchemy declarative base """
+    """ An SQLAlchemy declarative base. """
     pass
 
 
 class AssetType(Base):
-    """ Currency, share, bond, etc as a class """
+    """ Currency, share, bond, etc as a class. """
     __tablename__ = 'asset_type'
 
     id: Mapped[int] = mapped_column(sa.Identity(), primary_key=True)
@@ -43,7 +43,7 @@ class AssetType(Base):
 
 
 class Instrument(Base):
-    """ A single currency, share, bond, etc """
+    """ A single currency, share, bond, etc. """
     __tablename__ = 'instrument'
 
     # Compatible with the API instrument response
@@ -61,13 +61,14 @@ class Instrument(Base):
 
     asset_type_ref: Mapped[AssetType] = relationship(back_populates='instruments_ref', lazy='raise')
     candles_ref: Mapped[list[Candle]] = relationship(back_populates='instrument_ref', lazy='raise')
+    candles_scaled_ref: Mapped[list[CandleScaled]] = relationship(back_populates='instrument_ref', lazy='raise')
 
     def __repr__(self) -> str:
         return f'{self.name} ({self.figi})'
 
 
 class Candle(Base):
-    """ Historical pricing datum for an instrument """
+    """ Historical pricing datum for an instrument. """
     __tablename__ = 'candle'
 
     # Compatible with the history CSV files
@@ -79,10 +80,46 @@ class Candle(Base):
     low: Mapped[float] = mapped_column()
     volume: Mapped[int] = mapped_column()
 
+    # TODO: Add a clustered index.
+
     instrument_ref: Mapped[Instrument] = relationship(back_populates='candles_ref', lazy='raise')
 
     def __repr__(self) -> str:
         return f'{self.instrument_id:05} {self.timestamp:%Y-%m-%d %H:%M} ({self.low}-{self.open}-{self.close}-{self.high})'
+
+
+class CandleScaled(Base):
+    """ Historical data prepared for machine learning. """
+    __tablename__ = 'candle_scaled'
+
+    # All data have a zero mean and a standard deviation of 1.
+    instrument_id: Mapped[int] = mapped_column('instrument', ForeignKey('instrument.id'), primary_key=True)
+    timestamp: Mapped[int] = mapped_column(primary_key=True)
+    gap_time: Mapped[float] = mapped_column(type_=sa.types.REAL)
+    gap: Mapped[float] = mapped_column(type_=sa.types.REAL)
+    close: Mapped[float] = mapped_column(type_=sa.types.REAL)
+    high: Mapped[float] = mapped_column(type_=sa.types.REAL)
+    low: Mapped[float] = mapped_column(type_=sa.types.REAL)
+    volume: Mapped[float] = mapped_column(type_=sa.types.REAL)
+
+    instrument_ref: Mapped[Instrument] = relationship(back_populates='candles_scaled_ref', lazy='raise')
+
+    def __repr__(self) -> str:
+        return f'{self.instrument_id:05} {self.timestamp:%Y-%m-%d %H:%M} ' \
+               f'({self.gap_time}/{self.gap}-{self.low}-{self.high}-{self.close}/{self.volume})'
+
+
+class Split(Base):
+    """ Share splits, filled manually. """
+    __tablename__ = 'split'
+
+    # TODO: Add a foreign key.
+    instrument_id: Mapped[int] = mapped_column(primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(primary_key=True)
+    ratio: Mapped[float] = mapped_column()
+
+    def __repr__(self) -> str:
+        return f'{self.instrument_id:05} {self.timestamp:%Y-%m-%d %H:%M} ({self.ratio})'
 
 # endregion Database schema
 
@@ -118,7 +155,6 @@ class DB:
 
 
     async def disconnect(self) -> None:
-        # TODO: @contextlib.asynccontextmanager
         await self._pg_pool.close()
         await self._engine.dispose()
         logger.debug("Psycopg engine disposed.")
